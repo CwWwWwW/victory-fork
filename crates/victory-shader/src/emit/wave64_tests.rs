@@ -14,6 +14,16 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 const S_ENDPGM: u32 = 0xBF81_0000;
 
+// Keep hardware-less CI supported, but make a requested hardware test
+// fail rather than silently counting an unavailable device as a pass.
+fn gpu_unavailable(stage: &str, error: &str) {
+    if std::env::var("VICTORY_REQUIRE_GPU_TESTS").as_deref() == Ok("1") {
+        panic!("GPU test unavailable at {stage}: {error}");
+    }
+    eprintln!("GPU test skipped at {stage}: {error}");
+}
+
+
 /// 64 threads in one console wave. Each thread t holds the bit `1 << (t >> 1)`; the threads
 /// below s0 (a root constant) OR theirs over the wave inside `if (t < s0) { ... }` and store
 /// the result to dword 0 of the raw UAV.
@@ -181,14 +191,17 @@ fn a_sum_of_halves_over_the_wave_is_the_consoles_tree_bit_for_bit() {
     let in_a_row = terms.iter().copied().reduce(add).unwrap();
     assert_ne!(tree[0], in_a_row, "these terms tell the tree from another order");
     let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 hardware device; not run");
-        return;
+    let host = match Host::new(false) {
+        Ok(host) => host,
+        Err(error) => {
+            gpu_unavailable("device initialization", &error);
+            return;
+        }
     };
     let (root, pso) = match host.compute_pipeline(&shader) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("the hardware device does not take this program (waves of 32?): {e}; not run");
+            gpu_unavailable("compute pipeline creation", &e);
             return;
         }
     };
@@ -308,13 +321,19 @@ fn a_16_bit_sum_rounds_to_nearest_when_asked_to() {
             let mut copy = shader.dxil.clone();
             v.validate(&mut copy).expect("DXIL validation failed");
         }
-        let Ok(host) = Host::new(false) else {
-            eprintln!("no SM 6.6 hardware device; not run");
-            return;
+        let host = match Host::new(false) {
+            Ok(host) => host,
+            Err(error) => {
+                gpu_unavailable("device initialization", &error);
+                return;
+            }
         };
-        let Ok((root, pso)) = host.compute_pipeline(&shader) else {
-            eprintln!("the hardware device does not take this program; not run");
-            return;
+        let (root, pso) = match host.compute_pipeline(&shader) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                gpu_unavailable("compute pipeline creation", &error);
+                return;
+            }
         };
         let ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
         let out = host
@@ -382,14 +401,17 @@ fn a_wave_or_inside(skip: u32, name: &str) {
     // On a GPU that takes waves of 32 (two host waves for the console's one): the OR is of
     // both halves, whichever half's lanes take the branch.
     let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 hardware device; not run");
-        return;
+    let host = match Host::new(false) {
+        Ok(host) => host,
+        Err(error) => {
+            gpu_unavailable("device initialization", &error);
+            return;
+        }
     };
     let (root, pso) = match host.compute_pipeline(&shader) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("the hardware device does not take this program (waves of 32?): {e}; not run");
+            gpu_unavailable("compute pipeline creation", &e);
             return;
         }
     };
@@ -421,13 +443,19 @@ fn a_wave_or_inside(skip: u32, name: &str) {
 /// Runs `shader` on the hardware device with the root constants `s0`, `s1` and gives dword 0
 /// of the UAV; None (and a line) without a device that takes it.
 fn on_the_card(shader: &HostShader, constants: [u32; 2]) -> Option<u32> {
-    let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 hardware device; not run");
-        return None;
+    let host = match Host::new(false) {
+        Ok(host) => host,
+        Err(error) => {
+            gpu_unavailable("device initialization", &error);
+            return None;
+        }
     };
-    let Ok((root, pso)) = host.compute_pipeline(shader) else {
-        eprintln!("the hardware device does not take this program; not run");
-        return None;
+    let (root, pso) = match host.compute_pipeline(shader) {
+        Ok(pipeline) => pipeline,
+        Err(error) => {
+            gpu_unavailable("compute pipeline creation", &error);
+            return None;
+        }
     };
     let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
     for u in &shader.user_data {
