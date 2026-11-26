@@ -5,7 +5,7 @@ use std::ffi::{CString, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use victory_pe::{ImageInfo, ImportSymbol};
@@ -182,14 +182,36 @@ impl ImportResolver for WithTitleDlls<'_> {
     }
 }
 
+/// The staging files this process has made: two victories loading the same
+/// title must not write one deterministic `.tmp` name at the same time.
+static STAGED: AtomicU64 = AtomicU64::new(0);
+
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
     if std::fs::read(path).is_ok_and(|existing| existing == bytes) {
         return Ok(());
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("renaming to {}", path.display()))?;
-    Ok(())
+    let serial = STAGED.fetch_add(1, Ordering::Relaxed);
+    // One staging file per process and call: another process publishing the
+    // same image must not truncate this one, nor this one the other's.
+    let tmp = path.with_extension(format!("{}.{serial}.tmp", std::process::id()));
+    if let Err(error) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error).with_context(|| format!("writing {}", tmp.display()));
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // A second process may have published the same image while this
+            // one staged it: its complete copy is as good as this one.
+            let published = std::fs::read(path).is_ok_and(|existing| existing == bytes);
+            let _ = std::fs::remove_file(&tmp);
+            if published {
+                Ok(())
+            } else {
+                Err(error).with_context(|| format!("publishing {}", path.display()))
+            }
+        }
+    }
 }
 
 impl LoadedImage {
@@ -428,5 +450,39 @@ impl LoadedImage {
         crate::threads::unmapped(self.base());
         // SAFETY: guaranteed by the caller.
         unsafe { FreeLibrary(self.module) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    /// Two victories loading the same title stage their prepared copies into
+    /// the same folder: every preparation must publish a complete image.
+    #[test]
+    fn concurrent_preparations_publish_a_complete_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("victory-image-test.dll");
+        let bytes: Vec<u8> = (0..1usize << 20).map(|i| (i * 31) as u8).collect();
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (path, bytes, barrier) = (path.clone(), bytes.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_if_changed(&path, &bytes)
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap().expect("a preparation publishes");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let staged = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|e| e.path().extension().is_some_and(|x| x == "tmp")))
+            .count();
+        assert_eq!(staged, 0, "no staging file is left");
     }
 }
