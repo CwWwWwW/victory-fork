@@ -382,35 +382,41 @@ pub(crate) fn slot_rewritten(old: &ID3D12Resource, new: Option<&ID3D12Resource>)
     lean
 }
 
+/// The retirement list split at `finished`: what may be dropped now
+/// ([`Retired`]) and what still waits for its submission. A function of
+/// its own so the split can be made with no lock held ([`bury`]).
+fn split_retirement(
+    all: Vec<(u64, Retired)>,
+    finished: u64,
+) -> (Vec<Retired>, Vec<(u64, Retired)>) {
+    let (done, keep): (Vec<(u64, Retired)>, Vec<(u64, Retired)>) =
+        all.into_iter().partition(|(at, _)| *at <= finished);
+    (done.into_iter().map(|(_, object)| object).collect(), keep)
+}
+
 /// Drops what waited for submissions up to `finished`.
 fn bury(finished: u64) {
-    if retire_lean() {
-        // Taken out whole, sorted with no lock held, what still waits put
-        // back (beside what was retired meanwhile; the order means nothing).
-        let all = std::mem::take(&mut *RETIRED.lock().unwrap_or_else(|e| e.into_inner()));
-        if all.is_empty() {
-            return;
-        }
-        let (done, keep): (Vec<(u64, Retired)>, Vec<(u64, Retired)>) =
-            all.into_iter().partition(|(at, _)| *at <= finished);
-        if !keep.is_empty() {
-            RETIRED.lock().unwrap_or_else(|e| e.into_inner()).extend(keep);
-        }
-        reap(done.into_iter().map(|(_, object)| object).collect());
+    // Taken out whole, split with no lock held, what still waits put back
+    // (beside what was retired meanwhile; the order means nothing, and a
+    // retirement pushed while the split runs is dropped at the next
+    // landing). The lock is the one every recording thread's [`retire`]
+    // pushes into: run 313 retired 36.8 million objects in 240 s (some
+    // 150,000 a second, about ten a draw), and the split of the whole
+    // waiting list under that lock was work those threads stood behind.
+    // [`retire_lean`]'s path already split outside it; both do now (its
+    // semantics in [`retire`] and [`slot_rewritten`] are unchanged).
+    let all = std::mem::take(&mut *RETIRED.lock().unwrap_or_else(|e| e.into_inner()));
+    if all.is_empty() {
         return;
     }
-    let done: Vec<(u64, Retired)> = {
-        let mut retired = RETIRED.lock().unwrap_or_else(|e| e.into_inner());
-        if retired.is_empty() {
-            return;
-        }
-        let (done, keep) = std::mem::take(&mut *retired)
-            .into_iter()
-            .partition(|(at, _)| *at <= finished);
-        *retired = keep;
-        done
-    };
-    reap(done.into_iter().map(|(_, object)| object).collect());
+    let (done, keep) = split_retirement(all, finished);
+    if !keep.is_empty() {
+        RETIRED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(keep);
+    }
+    reap(done);
 }
 
 /// Whether host objects that are let go are dropped by a thread of their
@@ -1454,6 +1460,46 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 
 #[cfg(test)]
 mod tests {
+    /// [`split_retirement`]: what waited for a submission that has not
+    /// finished stays, what it waited for goes, and an empty list is as
+    /// empty as it came.
+    #[test]
+    fn retirement_keeps_what_still_waits_for_its_submission() {
+        let entries = |ats: &[u64]| -> Vec<(u64, super::Retired)> {
+            ats.iter()
+                .map(|&at| (at, super::Retired(Box::new(at))))
+                .collect()
+        };
+        let (done, keep) = super::split_retirement(entries(&[1, 2, 5]), 2);
+        assert_eq!(done.len(), 2);
+        assert_eq!(keep.iter().map(|(at, _)| *at).collect::<Vec<_>>(), vec![5]);
+        let (done, keep) = super::split_retirement(entries(&[7, 8]), 6);
+        assert!(done.is_empty());
+        assert_eq!(keep.len(), 2);
+        let (done, keep) = super::split_retirement(Vec::new(), 9);
+        assert!(done.is_empty() && keep.is_empty());
+    }
+
+    /// Offline microbenchmark (ignored): the split [`bury`] makes with no
+    /// lock held, over retirement lists the size of the ones it used to
+    /// split under the lock.
+    #[test]
+    #[ignore = "offline microbenchmark: run with --ignored --nocapture"]
+    fn bench_retirement_split_outside_the_lock() {
+        for n in [1_000u64, 10_000, 100_000] {
+            let all: Vec<(u64, super::Retired)> =
+                (0..n).map(|at| (at, super::Retired(Box::new(at)))).collect();
+            let started = std::time::Instant::now();
+            let (done, keep) = super::split_retirement(all, n / 2);
+            println!(
+                "retirement split of {n} objects ({} due, {} kept): {} ns",
+                done.len(),
+                keep.len(),
+                started.elapsed().as_nanos()
+            );
+        }
+    }
+
     /// Run once with VICTORY_CARD_SYNC_BATCH=0 and once with it set to 1.
     #[test]
     #[ignore = "requires a D3D12 adapter and the card hash pipeline; run alone"]
