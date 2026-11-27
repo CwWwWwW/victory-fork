@@ -27,7 +27,7 @@ contributors. Thank you.
   `scripts/play-framegen.ps1`, and its two optional environment names start
   with `TITLE_`.
 - *Ray-tracing fixes* (in `crates/victory-gpu/src/pipeline/make.rs` and
-  `memory.rs`). They only act when the title's ray tracing is switched on:
+  `memory.rs`). They only act while the title's ray tracing runs:
   - The per-material ray-tracing resolve programs are no longer waited for
     while the driver builds them, and they queue in a line of their own behind
     the pipelines that draws ask for. Before, a session with ray tracing on
@@ -42,25 +42,26 @@ contributors. Thank you.
   in flight while holding the submission lock; the submitting thread stood at
   that lock about 13 ms a frame in busy scenes, and about 48 ms with ray
   tracing on. With `VICTORY_DYNAMIC_WAIT=1` the draw waits only for the next
-  landing and does not hold the lock. It is **on** in the `raytracing` branch
-  and off by default here (`play --set VICTORY_DYNAMIC_WAIT=1` turns it on);
-  the log line `dynamic descriptor slots: ...` shows what it did.
+  landing and does not hold the lock. It is **on** by default
+  (`play --set VICTORY_DYNAMIC_WAIT=0` turns it off); the log line
+  `dynamic descriptor slots: ...` shows what it did.
 
-**Ray tracing: where it is and how to turn it on.** There are two branches.
-
-- `main` (this one): ray tracing is **off** by default, as in VIctory-NVIDIA,
-  with the fixes above built in. Turn it on with the in-game menu (F1, RAY
-  TRACING) or by starting with `play --set VICTORY_BVH_BUILDER=1`.
-- [`raytracing`](https://github.com/fxceless/victory-fork/tree/raytracing):
-  the same code with ray tracing **on** by default. Build that branch if you
-  want it on without any option.
+**Ray tracing is on by default.** Since 27 November 2026 the launcher
+(`victory play`) starts the title with its own ray tracing running
+(`VICTORY_BVH_BUILDER=1` in the launcher's settings), with the fixes above.
+VIctory-NVIDIA has it off by default. To play without it, start with
+`play --set VICTORY_BVH_BUILDER=0`: the light estimate takes its place again
+and the frame rate is higher. The `raytracing` branch is the same code as
+`main`.
 
 Ray tracing is work in progress. Measured on a GeForce RTX 4070 with the
 scene at 1920x1080: about 11 frames a second at 5,000 to 9,000 draws a frame
 and about 8 at 9,000 to 12,000, against about 18 to 14 and 12.5 without it.
-Known to be wrong still: the 8,192 pages also run out after about a minute of
-travel (the walkers then read zeros for new places), and the water's own
-light is left out on cards with 32-lane waves.
+The first visit to a place is slower while the driver builds that place's
+ray-tracing programs; they are saved for the next start. Known to be wrong
+still: the 8,192 pages also run out after about a minute of travel (the
+walkers then read zeros for new places), and the water's own light is left
+out on cards with 32-lane waves.
 
 **This fork's earlier work** (up to commit `9a9091d1`) stays in this
 repository's history, with its own credits in the README of that commit.
@@ -273,9 +274,10 @@ foxhound's own measurements, on an RTX 4070 SUPER, are in its README.
 
 What is known to be wrong:
 
-- **No ray tracing.** The title's own is off (`VICTORY_BVH_BUILDER=1`, or the
-  menu's RAY TRACING, turns it on: slow and with a broken picture on this
-  base). An estimate stands in for indirect light and reflections.
+- **Ray tracing is slow and not complete.** In this fork the title's own is
+  on by default (see the first section: what it costs and what is still
+  wrong). `play --set VICTORY_BVH_BUILDER=0` turns it off; an estimate then
+  stands in for indirect light and reflections.
 - **Frame generation needs room in the card's memory.** The layer fills the
   card with textures up to its budget; with frame generation on from the start
   the launcher holds a fifth of the budget back (a little less while it is only
