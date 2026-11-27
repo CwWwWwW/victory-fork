@@ -34,8 +34,7 @@ macro_rules! once {
 /// texture's subresources, and what was last detiled.
 pub(crate) struct Staging {
     buffer: ID3D12Resource,
-    /// Its bytes.
-    #[cfg(feature = "diagnostics")]
+    /// Its bytes: the padded total `GetCopyableFootprints` asks for.
     size: u64,
     data: *mut u8,
     footprints: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
@@ -827,7 +826,13 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
             let f = footprint.Footprint;
             // SAFETY: live resources.
             let (gpu, d) = unsafe { (staging.copy_source().GetGPUVirtualAddress(), texture.GetDesc()) };
-            let len = u64::from(f.RowPitch) * u64::from(staging.rows[i]) * u64::from(f.Depth);
+            let len = subresource_len(
+                footprint.Offset as usize,
+                f.RowPitch as usize,
+                staging.rows[i] as usize,
+                f.Depth as usize,
+                staging.size as usize,
+            ) as u64;
             list.note_read(
                 || {
                     format!(
@@ -1019,6 +1024,22 @@ pub(crate) fn card_writes(list: &HostList, resource: This, texture: &ID3D12Resou
         step.ran.store(true, std::sync::atomic::Ordering::Relaxed);
         step.on_demand.card_wrote(levels, memory);
     });
+}
+
+/// The bytes of a subresource's footprint that lie in a staging buffer of
+/// `allocated` bytes, its offset included: the host's
+/// `GetCopyableFootprints` does not pad the last row of the last
+/// subresource, so its advertised `pitch * rows * depth` can end past the
+/// buffer, and the slice the detiling writes must stop at the buffer's end.
+fn subresource_len(
+    offset: usize,
+    pitch: usize,
+    rows: usize,
+    depth: usize,
+    allocated: usize,
+) -> usize {
+    let advertised = pitch.saturating_mul(rows).saturating_mul(depth);
+    advertised.min(allocated.saturating_sub(offset))
 }
 
 impl Staging {
@@ -1353,8 +1374,15 @@ impl Staging {
             let (mip, slice) = (i as u32 % self.mips, i as u32 / self.mips);
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
-            let len = pitch * rows as usize * f.Depth as usize;
-            // SAFETY: the subresource's part of the mapped staging buffer.
+            let len = subresource_len(
+                footprint.Offset as usize,
+                pitch,
+                rows as usize,
+                f.Depth as usize,
+                self.size as usize,
+            );
+            // SAFETY: the subresource's whole rows, up to the staging buffer's
+            // end (see [`subresource_len`]).
             let linear = unsafe {
                 std::slice::from_raw_parts_mut(self.data.add(footprint.Offset as usize), len)
             };
@@ -1698,7 +1726,6 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     STAGED[1].fetch_add(total, std::sync::atomic::Ordering::Relaxed);
     let s = Arc::new(Staging {
         buffer,
-        #[cfg(feature = "diagnostics")]
         size: total,
         data,
         footprints,
@@ -1847,6 +1874,21 @@ mod title_memory_tests {
 
             assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
         }
+    }
+
+    /// `GetCopyableFootprints` does not pad the last row of the last
+    /// subresource: the slice `Staging::detile` makes for it stops at the
+    /// staging buffer's end instead of the advertised pitch * rows * depth.
+    #[test]
+    fn a_subresources_slice_stops_at_the_staging_buffers_end() {
+        // The 16-texel texture of runs 72/73: 8 rows of 128 bytes, 256 apart,
+        // in the 1,920-byte buffer the host sizes for it; advertised, the
+        // slice would be 2,048 bytes.
+        assert_eq!(super::subresource_len(0, 256, 8, 1, 1920), 1920);
+        // Four 1-row subresources of a 784-byte buffer: the last begins at 768
+        // and has 16 bytes left.
+        assert_eq!(super::subresource_len(768, 256, 1, 1, 784), 16);
+        assert_eq!(super::subresource_len(512, 256, 4, 1, 784), 272);
     }
 
     /// The texture both device-loss runs named last (16 texels wide, 4 or 8
