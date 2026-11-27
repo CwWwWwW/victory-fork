@@ -11,6 +11,10 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 const MAX_FILE_SIZE: usize = 512 * 1024;
+/// Rust source files are code, not data. They may grow past the general
+/// limit; the magic-byte, NUL-byte and encoded-run checks below still guard
+/// them against game data smuggled in as source.
+const MAX_SOURCE_FILE_SIZE: usize = 2 * 1024 * 1024;
 const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
@@ -202,9 +206,14 @@ pub fn check(path: &str, content: &[u8]) -> Vec<String> {
     if !allowed {
         problems.push("file type not on the allowlist".to_owned());
     }
-    if content.len() > MAX_FILE_SIZE {
+    let max_size = if ext.as_deref() == Some("rs") {
+        MAX_SOURCE_FILE_SIZE
+    } else {
+        MAX_FILE_SIZE
+    };
+    if content.len() > max_size {
         problems.push(format!(
-            "{} bytes exceeds the {MAX_FILE_SIZE}-byte limit",
+            "{} bytes exceeds the {max_size}-byte limit",
             content.len()
         ));
     }
@@ -264,6 +273,21 @@ mod tests {
         assert!(check(".githooks/pre-commit", b"#!/bin/sh\n").is_empty());
     }
 
+    /// Rust source has its own, larger ceiling; the content guards still
+    /// apply, and other files keep the general one.
+    #[test]
+    fn source_files_have_their_own_size_limit() {
+        let code = b"fn f() {}\n".repeat(60 * 1024);
+        assert!(code.len() > super::MAX_FILE_SIZE);
+        assert!(check("crates/x/src/host.rs", &code).is_empty());
+        let over = vec![b' '; super::MAX_SOURCE_FILE_SIZE + 1];
+        assert!(!check("crates/x/src/host.rs", &over).is_empty());
+        let mut embedded = code.clone();
+        embedded[1024] = 0;
+        assert!(!check("crates/x/src/host.rs", &embedded).is_empty());
+        assert!(!check("notes.txt", &vec![b' '; 600 * 1024]).is_empty());
+    }
+
     #[test]
     fn rejects_game_like_files() {
         assert!(!check("assets/tex.dds", b"DDS \x7c\0\0\0").is_empty());
@@ -276,8 +300,12 @@ mod tests {
             "extension not allowed"
         );
         assert!(
-            !check("a.rs", &vec![b'a'; 600 * 1024]).is_empty(),
+            !check("notes.txt", &vec![b' '; 600 * 1024]).is_empty(),
             "too big"
+        );
+        assert!(
+            !check("a.rs", &vec![b' '; super::MAX_SOURCE_FILE_SIZE + 1]).is_empty(),
+            "source too big"
         );
     }
 
