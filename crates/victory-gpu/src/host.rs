@@ -3187,6 +3187,17 @@ impl Drop for Deferred {
     fn drop(&mut self) {
         ALIVE[6].fetch_sub(self.uploads.len() as u64, Ordering::Relaxed);
         ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
+        // A recording let go without running (the title resets or releases a
+        // closed list it never executed) never writes its bottom-of-pipe
+        // values: a resolved query's read-back buffer would stay in the
+        // results map, one per ResolveQueryData, for the run's life. Applied
+        // writes were taken from that map already, so forgetting them again
+        // does nothing.
+        for (_, what, _) in &self.writes {
+            if let crate::queue::Written::Query(slot) = what {
+                crate::query::forget(*slot);
+            }
+        }
     }
 }
 
@@ -12337,5 +12348,28 @@ mod masked_patch_compile_tests {
         // SAFETY: the blob's own bytes.
         let size = unsafe { code.GetBufferSize() };
         assert!(size > 100);
+    }
+}
+
+#[cfg(test)]
+mod abandoned_recordings {
+    use super::Deferred;
+    use crate::queue::Written;
+    use std::sync::atomic::Ordering;
+
+    /// A recording let go without running (the title resets or releases a
+    /// closed list it never executed) never writes its resolved query
+    /// results: their read-back buffers are let go with it instead of
+    /// staying in the results map, one per ResolveQueryData, for the run's
+    /// life. Values and timestamps have nothing to let go.
+    #[test]
+    fn a_recording_let_go_unrun_lets_go_its_query_slots() {
+        let before = crate::query::FORGOTTEN.load(Ordering::Relaxed);
+        let mut deferred = Deferred::default();
+        deferred.writes.push((0x1000, Written::Query(11), 8));
+        deferred.writes.push((0x1008, Written::Value(1), 8));
+        deferred.writes.push((0x1010, Written::SystemTimestamp, 8));
+        drop(deferred);
+        assert_eq!(crate::query::FORGOTTEN.load(Ordering::Relaxed), before + 1);
     }
 }

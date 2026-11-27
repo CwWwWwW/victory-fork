@@ -264,6 +264,28 @@ pub(crate) fn resolve(list: &crate::host::HostList, this: This, kind: u32, first
     true
 }
 
+/// Lets go of `slot` without reading it: the recording that resolved this query was let go without running (the
+/// title reset or released a closed list it never executed), so the result can never be written and its read-back
+/// buffer would stay in [`RESULTS`] for the run's life.
+pub(crate) fn forget(slot: u32) {
+    #[cfg(test)]
+    FORGOTTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(windows)]
+    {
+        let _ = RESULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .and_then(|m| m.remove(&slot));
+    }
+    #[cfg(not(windows))]
+    let _ = slot;
+}
+
+/// Test hook: abandoned query slots let go ([`forget`]).
+#[cfg(test)]
+pub(crate) static FORGOTTEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The value of the resolved query in `slot` ([`resolve`]), once the list has run: read from its read-back buffer,
 /// or "visible" if that fails. The slot is let go.
 pub(crate) fn result(slot: u32) -> u64 {
