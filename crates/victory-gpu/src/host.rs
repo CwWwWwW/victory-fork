@@ -3201,6 +3201,10 @@ impl Drop for Deferred {
     }
 }
 
+#[cfg(test)]
+#[path = "host/abandoned_recordings.rs"]
+mod abandoned_recordings;
+
 /// Whether a queue's submissions go to the card without a wait for each
 /// (`VICTORY_LATE_WAIT=1`; off by default, and off in the timing run, which
 /// waits for every list on its own).
@@ -12348,28 +12352,5 @@ mod masked_patch_compile_tests {
         // SAFETY: the blob's own bytes.
         let size = unsafe { code.GetBufferSize() };
         assert!(size > 100);
-    }
-}
-
-#[cfg(test)]
-mod abandoned_recordings {
-    use super::Deferred;
-    use crate::queue::Written;
-    use std::sync::atomic::Ordering;
-
-    /// A recording let go without running (the title resets or releases a
-    /// closed list it never executed) never writes its resolved query
-    /// results: their read-back buffers are let go with it instead of
-    /// staying in the results map, one per ResolveQueryData, for the run's
-    /// life. Values and timestamps have nothing to let go.
-    #[test]
-    fn a_recording_let_go_unrun_lets_go_its_query_slots() {
-        let before = crate::query::FORGOTTEN.load(Ordering::Relaxed);
-        let mut deferred = Deferred::default();
-        deferred.writes.push((0x1000, Written::Query(11), 8));
-        deferred.writes.push((0x1008, Written::Value(1), 8));
-        deferred.writes.push((0x1010, Written::SystemTimestamp, 8));
-        drop(deferred);
-        assert_eq!(crate::query::FORGOTTEN.load(Ordering::Relaxed), before + 1);
     }
 }
