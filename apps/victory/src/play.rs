@@ -67,6 +67,9 @@ const SETTINGS: &[(&str, &str)] = &[
     ("VICTORY_SPANS_QUICK", "1"),
     ("VICTORY_SYNC_FINE", "1"),
     ("VICTORY_HEAP_SYNC_AT_SUBMIT", "1"),
+    // THE RAY-TRACING BUILD (branch `raytracing`): the title's own ray tracing runs (its structure builder
+    // and ray programs). The light estimate below switches itself off while it does (ambient.rs).
+    ("VICTORY_BVH_BUILDER", "1"),
     // Light without the title's ray tracing
     ("VICTORY_AMBIENT", "0.8"),
     ("VICTORY_AMBIENT_AIR", "1.5"),

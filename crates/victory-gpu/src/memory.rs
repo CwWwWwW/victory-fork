@@ -104,8 +104,13 @@ const BACK: u64 = 256 << 10;
 /// Pages taken from the faults, of one frame and in all, at most: a ray in a
 /// structure that is not right goes anywhere, and 2,048 a frame took all the
 /// pages there are in the first seconds (run light-4).
+/// In all: 2,048 until run 403, which had taken them within a minute of the
+/// builder's start; from then on hundreds of pages a frame were touched by
+/// the walking programs and had no copy (`made=0`) for the rest of the run,
+/// and every such step read zeros. 8,192 is a choice, not a measured need:
+/// the warning's `over_the_run` says whether it is enough.
 const FAULTS: usize = 128;
-const FAULTS_ALL: usize = 2048;
+const FAULTS_ALL: usize = 8192;
 /// Frames over which every page is looked at once.
 const SWEEP: usize = 128;
 
@@ -675,11 +680,25 @@ impl Memory {
         }
         pages.sort_unstable();
         let mut made = 0;
+        // Why the others got none: the frame's limit, the run's, not the
+        // title's memory, no place (a copy that cannot be numbered, no arena).
+        let mut left = [0u32; 4];
         for &page in &pages {
-            if made < FAULTS && self.faulted < FAULTS_ALL && self.copy_of(page).is_none() && self.map(page) {
+            if self.copy_of(page).is_some() {
+                continue;
+            }
+            if made >= FAULTS {
+                left[0] += 1;
+            } else if self.faulted >= FAULTS_ALL {
+                left[1] += 1;
+            } else if self.map(page) {
                 made += 1;
                 self.faulted += 1;
                 self.bring(page, page + 1);
+            } else if page < 0x1_0000 || page >= u64::from(MEMORY_PAGES) - 1 || self.refused.contains(&page) {
+                left[2] += 1;
+            } else {
+                left[3] += 1;
             }
         }
         self.stats.faults += pages.len() as u64;
@@ -697,6 +716,10 @@ impl Memory {
                 pages = pages.len(),
                 made,
                 held = self.pages.len(),
+                over_the_frame = left[0],
+                over_the_run = left[1],
+                not_the_titles = left[2],
+                no_place = left[3],
                 ?some,
                 "title memory by address: shaders touched pages that had no copy (those accesses read 0 or were dropped); those that are the title's are there now"
             );
