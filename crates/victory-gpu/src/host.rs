@@ -298,8 +298,12 @@ pub(crate) fn retire<T: 'static>(object: T) {
     let started = STARTED.load(Ordering::Acquire);
     if started <= FINISHED.load(Ordering::Acquire) {
         RETIREMENTS[0].fetch_add(1, Ordering::Relaxed);
-        if retire_lean() && !reaper_on() {
-            // Dropped here, as `reap` would, without a list made for it.
+        if !reaper_on() {
+            // Nothing is in flight and no thread of ours drops what is let
+            // go: the object can go here, as `reap` would drop it before
+            // returning, without the box and the one-element list it would
+            // make for it first (the two allocations this path made for
+            // every object let go while no submission ran).
             drop(object);
             return;
         }
@@ -1480,6 +1484,33 @@ mod tests {
         assert!(done.is_empty() && keep.is_empty());
     }
 
+    /// Offline microbenchmark (ignored): the allocations [`retire`] made
+    /// for an object let go while no submission ran — a `Box<dyn Any>` and
+    /// a one-element list for [`reap`] to drop — against the drop it makes
+    /// now.
+    #[test]
+    #[ignore = "offline microbenchmark: run with --ignored --nocapture"]
+    fn bench_retirement_allocations_avoided() {
+        const N: u32 = 200_000;
+        let started = std::time::Instant::now();
+        for _ in 0..N {
+            // What `retire` used to do: the box and the list, then `reap`
+            // dropping them on this thread.
+            super::reap(vec![super::Retired(Box::new(std::hint::black_box(0u64)))]);
+        }
+        let old = started.elapsed();
+        let started = std::time::Instant::now();
+        for _ in 0..N {
+            let _ = std::hint::black_box(0u64);
+        }
+        let new = started.elapsed();
+        println!(
+            "retirement without a submission in flight: box + list {:.1} ns an object, direct drop {:.1} ns, saved {:.1} ns",
+            old.as_nanos() as f64 / f64::from(N),
+            new.as_nanos() as f64 / f64::from(N),
+            (old.as_nanos() as f64 - new.as_nanos() as f64) / f64::from(N)
+        );
+    }
     /// Offline microbenchmark (ignored): the split [`bury`] makes with no
     /// lock held, over retirement lists the size of the ones it used to
     /// split under the lock.
