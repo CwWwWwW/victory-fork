@@ -3537,7 +3537,7 @@ mod tests {
     /// The source a placed view aliases is held while the caller copies it:
     /// the title may let go of its own reference between the lookup and the
     /// copy (or a recording thread may), and the copy still needs it.
-    #[cfg(all(windows, feature = "diagnostics"))]
+    #[cfg(windows)]
     #[test]
     fn an_alias_source_is_held_after_the_title_releases_it() {
         use std::sync::atomic::Ordering::Relaxed;
