@@ -537,6 +537,18 @@ pub extern "system" fn bind(s: Socket, name: *const u8, len: i32) -> i32 {
 
 // Forward lookups.
 
+/// A forward lookup the console answers without asking the network: no
+/// list is made, and the caller's output slot is cleared as a failed
+/// Windows lookup clears it (the host sets the slot to null on failure; a
+/// title may free the list it finds there after an error).
+fn blocked_lookup(result: *mut *mut c_void) -> i32 {
+    if !result.is_null() {
+        // SAFETY: the caller's output slot, checked non-null.
+        unsafe { result.write(std::ptr::null_mut()) };
+    }
+    WSAHOST_NOT_FOUND
+}
+
 pub extern "system" fn getaddrinfo(
     node: *const c_char,
     service: *const c_char,
@@ -544,7 +556,7 @@ pub extern "system" fn getaddrinfo(
     result: *mut *mut c_void,
 ) -> i32 {
     if !resolvable(narrow(node)) {
-        return WSAHOST_NOT_FOUND;
+        return blocked_lookup(result);
     }
     host!("ws2_32.dll", "getaddrinfo": extern "system" fn(*const c_char, *const c_char, *const c_void, *mut *mut c_void) -> i32)(
         node, service, hints, result,
@@ -558,7 +570,7 @@ pub extern "system" fn GetAddrInfoW(
     result: *mut *mut c_void,
 ) -> i32 {
     if !resolvable(wide(node)) {
-        return WSAHOST_NOT_FOUND;
+        return blocked_lookup(result);
     }
     host!("ws2_32.dll", "GetAddrInfoW": extern "system" fn(*const u16, *const u16, *const c_void, *mut *mut c_void) -> i32)(
         node, service, hints, result,
@@ -578,7 +590,7 @@ pub extern "system" fn GetAddrInfoExA(
     handle: *mut Handle,
 ) -> i32 {
     if !resolvable(narrow(name)) {
-        return WSAHOST_NOT_FOUND;
+        return blocked_lookup(result);
     }
     host!("ws2_32.dll", "GetAddrInfoExA": extern "system" fn(*const c_char, *const c_char, u32, *const c_void, *const c_void, *mut *mut c_void, *const c_void, *mut c_void, *const c_void, *mut Handle) -> i32)(
         name, service, namespace, provider, hints, result, timeout, overlapped, completion, handle,
@@ -598,7 +610,7 @@ pub extern "system" fn GetAddrInfoExW(
     handle: *mut Handle,
 ) -> i32 {
     if !resolvable(wide(name)) {
-        return WSAHOST_NOT_FOUND;
+        return blocked_lookup(result);
     }
     host!("ws2_32.dll", "GetAddrInfoExW": extern "system" fn(*const u16, *const u16, u32, *const c_void, *const c_void, *mut *mut c_void, *const c_void, *mut c_void, *const c_void, *mut Handle) -> i32)(
         name, service, namespace, provider, hints, result, timeout, overlapped, completion, handle,
@@ -1066,4 +1078,71 @@ mod tests {
             assert!(present, "{dll} lacks {}", e.name);
         }
     }
+
+    /// A lookup blocked before the host is asked still clears the caller's
+    /// output slot, as a failed Windows lookup does: a title that frees or
+    /// reuses the slot on the error path must find null there.
+    #[test]
+    fn blocked_lookups_clear_the_result_slot() {
+        let stale = 0x1234 as *mut c_void;
+        let mut result = stale;
+        assert_eq!(
+            getaddrinfo(c"example.com".as_ptr(), std::ptr::null(), std::ptr::null(), &mut result),
+            WSAHOST_NOT_FOUND
+        );
+        assert!(result.is_null(), "getaddrinfo left the caller's slot");
+        let name: Vec<u16> = "example.com\0".encode_utf16().collect();
+        result = stale;
+        assert_eq!(
+            GetAddrInfoW(name.as_ptr(), std::ptr::null(), std::ptr::null(), &mut result),
+            WSAHOST_NOT_FOUND
+        );
+        assert!(result.is_null(), "GetAddrInfoW left the caller's slot");
+        let mut handle: Handle = std::ptr::null_mut();
+        result = stale;
+        assert_eq!(
+            GetAddrInfoExA(
+                c"example.com".as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                &mut result,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut handle,
+            ),
+            WSAHOST_NOT_FOUND
+        );
+        assert!(result.is_null(), "GetAddrInfoExA left the caller's slot");
+        result = stale;
+        assert_eq!(
+            GetAddrInfoExW(
+                name.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                &mut result,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut handle,
+            ),
+            WSAHOST_NOT_FOUND
+        );
+        assert!(result.is_null(), "GetAddrInfoExW left the caller's slot");
+        // A null slot is tolerated: the blocked path never writes through it.
+        assert_eq!(
+            getaddrinfo(
+                c"example.com".as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            ),
+            WSAHOST_NOT_FOUND
+        );
+    }
+
 }
