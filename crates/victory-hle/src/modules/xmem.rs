@@ -1367,7 +1367,8 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
 /// in place of what `to` shows; `from` 0 unmaps. The GPU's page-mapping
 /// copies (`victory_gpu`, queue `CopyPageMappingsBatchX`):
 /// the title maps pages into a pool view, then has the GPU map them into its tiled
-/// heap. Page by page; false if a source page is not mapped physical memory.
+/// heap. Page by page; false if a source page is not mapped physical memory,
+/// with the destination left as it was.
 pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
     let _costed = Costed::begin(None);
     alias(to, from, len)
@@ -1389,35 +1390,33 @@ fn alias_as(to: u64, from: u64, len: u64, runs_in_one: bool, lazy: bool) -> bool
     // before the views, as there).
     let _changing = victory_gpu::title_memory_remapping();
     let mut physical = physical();
-    unmap(&mut physical, to, len);
-    if from == 0 {
-        return true;
-    }
-    // A range mapped onto itself (shifted) is looked up page by page as it
-    // changes, as before.
-    if to < from + len && from < to + len {
+    // Every source page is looked at before the destination is touched:
+    // `unmap` takes whole views away, so a source range that overlaps the
+    // destination would lose its pages with it, and a source page that is not
+    // mapped physical memory must fail the copy with the destination unchanged.
+    let mut slices: Vec<Slice> = Vec::new();
+    if from != 0 {
+        slices.reserve(len.div_ceil(PAGE));
         for k in (0..len).step_by(PAGE) {
             let Some(slice) = physical.slice_at(from + k) else {
                 return false;
             };
-            if !place(&mut physical, to + k, PAGE, slice, lazy) {
+            slices.push(slice);
+        }
+    }
+    unmap(&mut physical, to, len);
+    if from == 0 {
+        return true;
+    }
+    // A range mapped onto itself (shifted) is mapped page by page from the
+    // pages looked at above.
+    if to < from + len && from < to + len {
+        for (k, slice) in slices.into_iter().enumerate() {
+            if !place(&mut physical, to + k * PAGE, PAGE, slice, lazy) {
                 return false;
             }
         }
         return true;
-    }
-    // The pages to show, up to the first that is not mapped physical
-    // memory (those before it are mapped all the same, as before).
-    let mut slices = Vec::with_capacity(len / PAGE);
-    let mut found = true;
-    for k in (0..len).step_by(PAGE) {
-        match physical.slice_at(from + k) {
-            Some(slice) => slices.push(slice),
-            None => {
-                found = false;
-                break;
-            }
-        }
     }
     let runs = runs_of(&slices);
     if super::dstorage::stream_log::on() {
@@ -1454,14 +1453,14 @@ fn alias_as(to: u64, from: u64, len: u64, runs_in_one: bool, lazy: bool) -> bool
             }
             k += run;
         }
-        return found;
+        return true;
     }
     for (k, slice) in slices.into_iter().enumerate() {
         if !place(&mut physical, to + k * PAGE, PAGE, slice, lazy) {
             return false;
         }
     }
-    found
+    true
 }
 
 /// Whether `[base, base + len)`, all placeholders after an unmapping, is
@@ -3374,6 +3373,118 @@ mod tests {
         assert_eq!(XMemFreePhysicalPages(1, pages[..1].as_ptr()), 1);
     }
 
+    /// A GPU page-mapping copy (`map_alias`) whose source page is not mapped
+    /// physical memory fails without taking away what the destination showed:
+    /// the title keeps its pool page and reads it after the failure.
+    #[test]
+    fn a_failed_alias_leaves_the_destination_it_showed() {
+        let mut pages = [0usize; 1];
+        let mut n = 1;
+        assert_eq!(XMemAllocatePhysicalPages(0, &mut n, pages.as_mut_ptr()), 1);
+        let a = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            PAGE,
+            MEM_RESERVE | PAGES_64K,
+            0,
+            PAGE_READWRITE,
+        );
+        let b = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            PAGE,
+            MEM_RESERVE | PAGES_64K,
+            0,
+            PAGE_READWRITE,
+        );
+        // Reserved and never mapped: it shows no page at all.
+        let empty = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            PAGE,
+            MEM_RESERVE | PAGES_64K,
+            0,
+            PAGE_READWRITE,
+        );
+        assert!(!a.is_null() && !b.is_null() && !empty.is_null());
+        assert_eq!(XMemMapPhysicalPages(a, 1, pages.as_ptr()), a);
+        assert_eq!(XMemMapPhysicalPages(b, 1, pages.as_ptr()), b);
+        // SAFETY: both pages are mapped read-write.
+        unsafe {
+            a.cast::<u8>().write(0x11);
+            b.cast::<u8>().write(0x77);
+        }
+        // The source is not mapped physical memory: the copy cannot find it.
+        assert!(!map_alias(b as u64, empty as u64, PAGE as u64));
+        assert_eq!(query(b).host.State, MEM_COMMIT);
+        // SAFETY: still the page mapped above.
+        assert_eq!(unsafe { b.cast::<u8>().read() }, 0x77);
+        assert_eq!(XMemMapPhysicalPages(a, 1, std::ptr::null()), a);
+        assert_eq!(XMemMapPhysicalPages(b, 1, std::ptr::null()), b);
+        assert_eq!(XMemFreePhysicalPages(1, pages.as_ptr()), 1);
+    }
+
+    /// An alias of a page over itself is the copy the GPU's page mapping makes
+    /// when the pool page and the target are the same page: it keeps the page
+    /// it showed, where the unmap used to take it away first.
+    #[test]
+    fn an_alias_of_a_page_over_itself_keeps_it() {
+        let mut pages = [0usize; 1];
+        let mut n = 1;
+        assert_eq!(XMemAllocatePhysicalPages(0, &mut n, pages.as_mut_ptr()), 1);
+        let a = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            PAGE,
+            MEM_RESERVE | PAGES_64K,
+            0,
+            PAGE_READWRITE,
+        );
+        assert!(!a.is_null());
+        assert_eq!(XMemMapPhysicalPages(a, 1, pages.as_ptr()), a);
+        // SAFETY: mapped read-write.
+        unsafe { a.cast::<u8>().write(0x5a) };
+        assert!(map_alias(a as u64, a as u64, PAGE as u64));
+        assert_eq!(query(a).host.State, MEM_COMMIT);
+        // SAFETY: still mapped.
+        assert_eq!(unsafe { a.cast::<u8>().read() }, 0x5a);
+        assert_eq!(XMemMapPhysicalPages(a, 1, std::ptr::null()), a);
+        assert_eq!(XMemFreePhysicalPages(1, pages.as_ptr()), 1);
+    }
+
+    /// An alias that overlaps its own source (a shift by a page) still uses
+    /// the pages shown before the call, even though the unmap took their
+    /// views away.
+    #[test]
+    fn an_alias_that_shifts_over_its_source_keeps_both_pages() {
+        let mut pages = [0usize; 2];
+        let mut n = 2;
+        assert_eq!(XMemAllocatePhysicalPages(0, &mut n, pages.as_mut_ptr()), 1);
+        let a = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            3 * PAGE,
+            MEM_RESERVE | PAGES_64K,
+            0,
+            PAGE_READWRITE,
+        );
+        assert!(!a.is_null());
+        assert_eq!(XMemMapPhysicalPages(a, 2, pages.as_ptr()), a);
+        // SAFETY: mapped read-write.
+        unsafe {
+            a.cast::<u8>().write(0x11);
+            a.wrapping_byte_add(PAGE).cast::<u8>().write(0x22);
+        }
+        // Pages 0 and 1, one page higher: page 1's source lies inside the
+        // range the call replaces.
+        assert!(map_alias(
+            a.wrapping_byte_add(PAGE) as u64,
+            a as u64,
+            (2 * PAGE) as u64
+        ));
+        // SAFETY: mapped read-write.
+        unsafe {
+            assert_eq!(a.wrapping_byte_add(PAGE).cast::<u8>().read(), 0x11);
+            assert_eq!(a.wrapping_byte_add(2 * PAGE).cast::<u8>().read(), 0x22);
+        }
+        assert_eq!(XMemMapPhysicalPages(a, 3, std::ptr::null()), a);
+        assert_eq!(XMemFreePhysicalPages(2, pages.as_ptr()), 1);
+    }
 
     /// A thread that reads a mapped page in place, as the GPU side reads a
     /// texture, never meets the moment in which the runtime has taken the
