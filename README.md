@@ -20,10 +20,47 @@ repository's history and the Credits section further down), built on
 [VIctory](https://github.com/Marvisak/VIctory) by Marvisak and its
 contributors. Thank you.
 
-**What differs here from VIctory-NVIDIA.** Wording only: this repository does
-not name the title, so a handful of comments and launcher texts say "the
-title", one launcher script is named `scripts/play-framegen.ps1`, and its two
-optional environment names start with `TITLE_`. No code is changed.
+**What differs here from VIctory-NVIDIA.**
+
+- *Wording.* This repository does not name the title, so a handful of comments
+  and launcher texts say "the title", one launcher script is named
+  `scripts/play-framegen.ps1`, and its two optional environment names start
+  with `TITLE_`.
+- *Ray-tracing fixes* (in `crates/victory-gpu/src/pipeline/make.rs` and
+  `memory.rs`). They only act when the title's ray tracing is switched on:
+  - The per-material ray-tracing resolve programs are no longer waited for
+    while the driver builds them, and they queue in a line of their own behind
+    the pipelines that draws ask for. Before, a session with ray tracing on
+    ran at about 280 ms a frame for as long as any of them was being built.
+  - The run's limit on memory pages made for the ray walkers goes from 2,048
+    to 8,192, and the log says why a page got no copy. With 2,048 the pages
+    ran out within a minute and the walkers read zeros from then on.
+  - A log line names the pipeline whenever a frame waited 50 ms or more for
+    one.
+- *A stall at one lock* (`crates/victory-gpu/src/host.rs`, `wait_for_slots`).
+  A draw that finds no free dynamic descriptor slot used to settle everything
+  in flight while holding the submission lock; the submitting thread stood at
+  that lock about 13 ms a frame in busy scenes, and about 48 ms with ray
+  tracing on. With `VICTORY_DYNAMIC_WAIT=1` the draw waits only for the next
+  landing and does not hold the lock. It is **on** in the `raytracing` branch
+  and off by default here (`play --set VICTORY_DYNAMIC_WAIT=1` turns it on);
+  the log line `dynamic descriptor slots: ...` shows what it did.
+
+**Ray tracing: where it is and how to turn it on.** There are two branches.
+
+- `main` (this one): ray tracing is **off** by default, as in VIctory-NVIDIA,
+  with the fixes above built in. Turn it on with the in-game menu (F1, RAY
+  TRACING) or by starting with `play --set VICTORY_BVH_BUILDER=1`.
+- [`raytracing`](https://github.com/fxceless/victory-fork/tree/raytracing):
+  the same code with ray tracing **on** by default. Build that branch if you
+  want it on without any option.
+
+Ray tracing is work in progress. Measured on a GeForce RTX 4070 with the
+scene at 1920x1080: about 11 frames a second at 5,000 to 9,000 draws a frame
+and about 8 at 9,000 to 12,000, against about 18 to 14 and 12.5 without it.
+Known to be wrong still: the 8,192 pages also run out after about a minute of
+travel (the walkers then read zeros for new places), and the water's own
+light is left out on cards with 32-lane waves.
 
 **This fork's earlier work** (up to commit `9a9091d1`) stays in this
 repository's history, with its own credits in the README of that commit.
