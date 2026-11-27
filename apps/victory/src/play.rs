@@ -70,6 +70,10 @@ const SETTINGS: &[(&str, &str)] = &[
     // THE RAY-TRACING BUILD (branch `raytracing`): the title's own ray tracing runs (its structure builder
     // and ray programs). The light estimate below switches itself off while it does (ambient.rs).
     ("VICTORY_BVH_BUILDER", "1"),
+    // A draw that finds no free dynamic descriptor slot waits for the next landing without the
+    // submission lock (host.rs `wait_for_slots`). With ray tracing on, at 9,000 to 12,000 draws a
+    // frame, the submitting thread stood about 48 ms a frame at that lock; about 13 ms with it off.
+    ("VICTORY_DYNAMIC_WAIT", "1"),
     // Light without the title's ray tracing
     ("VICTORY_AMBIENT", "0.8"),
     ("VICTORY_AMBIENT_AIR", "1.5"),
