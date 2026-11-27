@@ -1773,39 +1773,6 @@ mod tests {
         release(rest);
     }
 
-    /// The platform refuses a reading-callback registration (measured on the
-    /// host's GameInput.dll: E_NOTIMPL, the token cleared), so a title that
-    /// checks the HRESULT falls back to polling instead of waiting for
-    /// callbacks this runtime never calls.
-    #[test]
-    fn a_reading_callback_registration_is_refused_like_the_platform_does() {
-        let (hub, _host) = fake();
-        type Register = extern "system" fn(
-            This,
-            *const c_void,
-            u32,
-            f32,
-            *mut c_void,
-            *const c_void,
-            *mut u64,
-        ) -> HRESULT;
-        let register = slot::<Register, _>(&hub.object, 0x40);
-        let mut token = 0xdead_beef_u64;
-        assert_eq!(
-            register(
-                &hub.object,
-                std::ptr::null(),
-                0,
-                0.0,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                &mut token
-            ),
-            E_NOTIMPL
-        );
-        assert_eq!(token, 0, "the token is cleared");
-    }
-
     #[test]
     fn keys_feed_the_keyboard_and_the_stand_in_pad() {
         let (hub, host) = fake();
@@ -1840,6 +1807,39 @@ mod tests {
         release(r);
         // A keyboard reading is no gamepad reading.
         assert_eq!(current(hub, GAMEPAD_KIND, KEYBOARD), Err(READING_NOT_FOUND));
+    }
+
+    /// The platform refuses a reading-callback registration (measured on the
+    /// host's GameInput.dll: E_NOTIMPL, the token cleared), so a title that
+    /// checks the HRESULT falls back to polling instead of waiting for
+    /// callbacks this runtime never calls.
+    #[test]
+    fn a_reading_callback_registration_is_refused_like_the_platform_does() {
+        let (hub, _host) = fake();
+        type Register = extern "system" fn(
+            This,
+            *const c_void,
+            u32,
+            f32,
+            *mut c_void,
+            *const c_void,
+            *mut u64,
+        ) -> HRESULT;
+        let register = slot::<Register, _>(&hub.object, 0x40);
+        let mut token = 0xdead_beef_u64;
+        assert_eq!(
+            register(
+                &hub.object,
+                std::ptr::null(),
+                0,
+                0.0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut token
+            ),
+            E_NOTIMPL
+        );
+        assert_eq!(token, 0, "the token is cleared");
     }
 
     #[test]
