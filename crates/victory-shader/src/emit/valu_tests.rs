@@ -586,6 +586,9 @@ fn v_cmp_lg_is_false_for_nan() {
 /// bits, so a driver that takes fast-math operands as never NaN cannot fold
 /// them away.
 #[test]
+// The ordered/unordered IEEE answers are the point: clippy's suggested
+// rewrites (`a != b`, `a < b`) change how NaNs answer.
+#[allow(clippy::double_comparisons, clippy::neg_cmp_op_on_partial_ord)]
 fn every_f32_comparison_answers_nans_as_ieee() {
     let nan = f32::NAN.to_bits();
     let snan = 0x7F80_0001u32;
