@@ -298,7 +298,10 @@ impl Layout {
             && matches!(d.block, 1 | 4)
             && d.samples.is_power_of_two()
             && d.samples <= 8
-            && (d.samples == 1 || (d.dimension == Dimension::Tex2d && d.mips == 1))
+            && (d.samples == 1
+                || (d.dimension == Dimension::Tex2d
+                    && d.mips == 1
+                    && d.swizzle != Swizzle::LINEAR))
             && (d.dimension != Dimension::Tex1d || d.height == 1)
             && (d.dimension != Dimension::Tex3d
                 || matches!(d.swizzle.0, 0 | 5 | 9 | 17 | 21 | 24..=27));
@@ -1320,6 +1323,24 @@ mod tests {
             layout.detile(&tiled, 0, 0, &mut linear, 16, usize::MAX),
             Err(Error::TooSmall)
         );
+    }
+
+    /// Multisampled rows cannot be laid out linearly here: the placement math
+    /// is one sample's, so the reported slice sizes and the copy paths would
+    /// disagree with the samples the description names. Tiled multisampled
+    /// layouts are unaffected (their copies are refused as unsupported, but
+    /// they describe a real slice).
+    #[test]
+    fn multisampled_linear_layouts_are_invalid() {
+        let mut linear = desc(256, 256, 1, 4, Swizzle::LINEAR);
+        linear.samples = 4;
+        assert_eq!(Layout::new(&linear), Err(Error::Invalid));
+        // One sample: linear is fine, as before.
+        assert!(Layout::new(&desc(256, 256, 1, 4, Swizzle::LINEAR)).is_ok());
+        // Tiled multisampled layouts still describe a slice.
+        let mut tiled = desc(256, 256, 1, 4, Swizzle::SW_4KB_S);
+        tiled.samples = 4;
+        assert!(Layout::new(&tiled).is_ok());
     }
 
     #[test]

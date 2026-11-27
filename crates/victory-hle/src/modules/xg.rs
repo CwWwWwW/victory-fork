@@ -775,6 +775,15 @@ mod tests {
         assert_eq!(XGCreateTextureComputer(&bad, &mut c), E_INVALIDARG);
         let bad = desc(256, 256, 1, 28, 0x103);
         assert_eq!(XGCreateTextureComputer(&bad, &mut c), E_INVALIDARG);
+        // A multisampled row-major (linear) texture is refused: the layout is
+        // one sample's, so its sizes and copies would disagree with the
+        // samples the description names.
+        let mut bad = desc(256, 256, 1, 11, ROW_MAJOR);
+        bad.samples = 4;
+        assert_eq!(XGCreateTextureComputer(&bad, &mut c), E_INVALIDARG);
+        // The same texture with one sample is still a texture.
+        let c = create(&desc(256, 256, 1, 11, ROW_MAJOR));
+        assert_eq!(release(c), 0);
         assert!(module().exports.len() == 2);
     }
 }
